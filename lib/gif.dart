@@ -7,6 +7,7 @@
 
 library gif;
 
+import 'dart:async';
 import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -24,7 +25,7 @@ Client get _httpClient {
 /// How to auto start the gif.
 enum Autostart {
   /// Don't start.
-  no,
+  none,
 
   /// Run once everytime a new gif is loaded.
   once,
@@ -62,6 +63,9 @@ class Gif extends StatefulWidget {
   /// Called when gif frames fetch is completed.
   final VoidCallback? onFetchCompleted;
 
+  /// Starts playing as soon as frames begin to load
+  final bool playDuringLoading;
+
   final double? width;
   final double? height;
   final Color? color;
@@ -81,7 +85,7 @@ class Gif extends StatefulWidget {
   ///
   /// [duration] whole playback duration for this gif.
   ///
-  /// [autostart] if and how to start this gif. Defaults to [Autostart.no].
+  /// [autostart] if and how to start this gif. Defaults to [Autostart.none].
   ///
   /// [placeholder] this widget is rendered during the gif frames fetch.
   ///
@@ -91,17 +95,18 @@ class Gif extends StatefulWidget {
   /// Only one of the two can be set: [fps] or [duration]
   /// If [controller.duration] and [fps] are not specified, the original gif
   /// framerate will be used.
-  Gif({
+  const Gif({
     Key? key,
     required this.image,
     this.controller,
     this.fps,
     this.duration,
-    this.autostart = Autostart.no,
+    this.autostart = Autostart.none,
     this.placeholder,
     this.onFetchCompleted,
     this.semanticLabel,
     this.excludeFromSemantics = false,
+    this.playDuringLoading = true,
     this.width,
     this.height,
     this.color,
@@ -159,7 +164,7 @@ class GifInfo {
   final List<ImageInfo> frames;
   final Duration duration;
 
-  GifInfo({
+  const GifInfo({
     required this.frames,
     required this.duration,
   });
@@ -171,11 +176,14 @@ class _GifState extends State<Gif> with SingleTickerProviderStateMixin {
   /// List of [ImageInfo] of every frame of this gif.
   List<ImageInfo> _frames = [];
 
+  List<Duration> _durations = [];
+
   int _frameIndex = 0;
 
   /// Current rendered frame.
-  ImageInfo? get _frame =>
-      _frames.length > _frameIndex ? _frames[_frameIndex] : null;
+  ImageInfo? get _frame => _frames.length > _frameIndex ? _frames[_frameIndex] : null;
+
+  bool _loading = true;
 
   @override
   Widget build(BuildContext context) {
@@ -207,7 +215,7 @@ class _GifState extends State<Gif> with SingleTickerProviderStateMixin {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    _loadFrames().then((value) => _autostart());
+    _loadFrames();
   }
 
   @override
@@ -218,9 +226,7 @@ class _GifState extends State<Gif> with SingleTickerProviderStateMixin {
       _controller = widget.controller ?? GifController(vsync: this);
       _controller.addListener(_listener);
     }
-    if ((widget.image != oldWidget.image) ||
-        (widget.fps != oldWidget.fps) ||
-        (widget.duration != oldWidget.duration)) {
+    if ((widget.image != oldWidget.image) || (widget.fps != oldWidget.fps) || (widget.duration != oldWidget.duration)) {
       _loadFrames().then((value) {
         if (widget.image != oldWidget.image) {
           _autostart();
@@ -250,8 +256,8 @@ class _GifState extends State<Gif> with SingleTickerProviderStateMixin {
 
   /// Start this gif according to [widget.autostart] and [widget.loop].
   void _autostart() {
-    if (mounted && widget.autostart != Autostart.no) {
-      _controller..reset();
+    if (mounted && widget.autostart != Autostart.none) {
+      _controller.reset();
       if (widget.autostart == Autostart.loop) {
         _controller.repeat();
       } else {
@@ -278,11 +284,33 @@ class _GifState extends State<Gif> with SingleTickerProviderStateMixin {
   /// The calculation is based on the frames of the gif
   /// and the [Duration] of [AnimationController].
   void _listener() {
-    if (_frames.isNotEmpty && mounted) {
+    if (!mounted || _loading) return;
+
+    setState(() {
+      if (_frames.isEmpty) {
+        _frameIndex = 0;
+      } else {
+        _frameIndex = ((_frames.length - 1) * _controller.value).floor();
+      }
+    });
+  }
+
+  void _updateLoadingFrames(int frame) {
+    if (!mounted) return;
+
+    if (_loading == false && frame == _frames.length) {
+      _autostart();
+    } else if (_frames.length > frame) {
       setState(() {
-        _frameIndex = _frames.isEmpty
-            ? 0
-            : ((_frames.length - 1) * _controller.value).floor();
+        _frameIndex = frame;
+      });
+
+      Timer(_durations[frame], () {
+        _updateLoadingFrames(frame + 1);
+      });
+    } else {
+      Timer(const Duration(milliseconds: 1), () {
+        _updateLoadingFrames(frame);
       });
     }
   }
@@ -301,16 +329,12 @@ class _GifState extends State<Gif> with SingleTickerProviderStateMixin {
 
     if (!mounted) return;
 
-    if (widget.useCache)
-      Gif.cache.caches.putIfAbsent(_getImageKey(widget.image), () => gif);
+    if (widget.useCache) Gif.cache.caches.putIfAbsent(_getImageKey(widget.image), () => gif);
     Duration duration;
-    duration = widget.fps != null
-        ? Duration(milliseconds: (_frames.length / widget.fps! * 1000).round())
-        : widget.duration ?? gif.duration;
+    duration = widget.fps != null ? Duration(milliseconds: (_frames.length / widget.fps! * 1000).round()) : widget.duration ?? gif.duration;
 
     if (duration == Duration.zero) {
-      duration = Duration(
-          milliseconds: (gif.frames.length / defualtFps * 1000).round());
+      duration = Duration(milliseconds: (gif.frames.length / defualtFps * 1000).round());
     }
     setState(() {
       _frames = gif.frames;
@@ -319,9 +343,13 @@ class _GifState extends State<Gif> with SingleTickerProviderStateMixin {
         widget.onFetchCompleted!();
       }
     });
+
+    if (!widget.playDuringLoading) _autostart();
   }
 
-  static Future<GifInfo> _fetchFrames(ImageProvider provider) async {
+  Future<GifInfo> _fetchFrames(ImageProvider provider) async {
+    _loading = true;
+
     late final Uint8List bytes;
 
     if (provider is NetworkImage) {
@@ -332,8 +360,7 @@ class _GifState extends State<Gif> with SingleTickerProviderStateMixin {
       );
       bytes = response.bodyBytes;
     } else if (provider is AssetImage) {
-      AssetBundleImageKey key =
-          await provider.obtainKey(const ImageConfiguration());
+      AssetBundleImageKey key = await provider.obtainKey(const ImageConfiguration());
       bytes = (await key.bundle.load(key.name)).buffer.asUint8List();
     } else if (provider is FileImage) {
       bytes = await provider.file.readAsBytes();
@@ -343,14 +370,39 @@ class _GifState extends State<Gif> with SingleTickerProviderStateMixin {
 
     final Codec codec = await instantiateImageCodec(bytes);
 
-    List<ImageInfo> infos = [];
-    Duration duration = Duration();
+    final List<ImageInfo> infos = [];
+    final List<Duration> durations = [];
+    Duration duration = Duration.zero;
 
     for (int i = 0; i < codec.frameCount; i++) {
+      if (!mounted) break;
+
       FrameInfo frameInfo = await codec.getNextFrame();
       infos.add(ImageInfo(image: frameInfo.image));
-      duration += frameInfo.duration;
+
+      late final Duration frameDuration;
+
+      if (frameInfo.duration == Duration.zero) {
+        frameDuration = Duration(milliseconds: (defualtFps * 1000).round());
+      } else {
+        frameDuration = frameInfo.duration;
+      }
+
+      durations.add(frameDuration);
+      duration += frameDuration;
+
+      if (!mounted) break;
+
+      setState(() {
+        _frames = infos;
+        _durations = durations;
+        _controller.duration = duration;
+
+        if (i == 0 && widget.playDuringLoading) _updateLoadingFrames(0);
+      });
     }
+
+    if (mounted) _loading = false;
 
     return GifInfo(frames: infos, duration: duration);
   }
