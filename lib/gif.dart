@@ -244,6 +244,9 @@ class _GifState extends State<Gif> with SingleTickerProviderStateMixin {
     if (widget.controller == null) {
       _controller.dispose();
     }
+
+    _frames.clear();
+
     super.dispose();
   }
 
@@ -370,7 +373,7 @@ class _GifState extends State<Gif> with SingleTickerProviderStateMixin {
 
     final Codec codec = await instantiateImageCodec(bytes);
 
-    final List<ImageInfo> infos = [];
+    List<ImageInfo> infos = [];
     final List<Duration> durations = [];
     Duration duration = Duration.zero;
 
@@ -391,7 +394,11 @@ class _GifState extends State<Gif> with SingleTickerProviderStateMixin {
       durations.add(frameDuration);
       duration += frameDuration;
 
-      if (!mounted) break;
+      if (!mounted) {
+        infos = List<ImageInfo>.empty();
+        duration = Duration.zero;
+        break;
+      }
 
       setState(() {
         _frames = infos;
@@ -403,6 +410,8 @@ class _GifState extends State<Gif> with SingleTickerProviderStateMixin {
     }
 
     if (mounted) _loading = false;
+    
+    codec.dispose();
 
     return GifInfo(frames: infos, duration: duration);
   }
