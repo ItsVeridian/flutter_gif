@@ -381,6 +381,8 @@ class _GifState extends State<Gif> with SingleTickerProviderStateMixin {
       if (!mounted) break;
 
       FrameInfo frameInfo = await codec.getNextFrame();
+      if (!mounted) break;
+      
       infos.add(ImageInfo(image: frameInfo.image));
 
       late final Duration frameDuration;
